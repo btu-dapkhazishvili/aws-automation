@@ -70,26 +70,96 @@ def create_subnets(args, vpc, client):
     return subnets
 
 
+def create_security_group(args, vpc, client):
+    security_group = client.create_security_group(
+        GroupName=args.security_group_name,
+        Description=args.security_group_description,
+        VpcId=vpc['VpcId']
+    )
+
+    client.authorize_security_group_ingress(
+        GroupId=security_group['GroupId'],
+        IpPermissions=[
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 80,
+                'ToPort': 80,
+                'IpRanges': [{'CidrIp': '0.0.0.0/0'}]
+            },
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 22,
+                'ToPort': 22,
+                'IpRanges': [{'CidrIp': args.source_ip + '/32'}]
+            }
+        ]
+    )
+
+    return security_group
+
+
+def create_key_pair(args, client):
+    key_pair = client.create_key_pair(KeyName=args.key_pair_name)
+    with open(args.key_pair_file, 'w') as f:
+        f.write(key_pair['KeyMaterial'])
+
+    return key_pair
+
+
+def launch_instance(args, vpc, subnet, security_group, key_pair, client):
+    instance = client.run_instances(
+        ImageId=args.image_id,
+        InstanceType=args.instance_type,
+        MinCount=1,
+        MaxCount=1,
+        KeyName=args.key_pair_name,
+        NetworkInterfaces=[
+            {
+                'SubnetId': subnet['SubnetId'],
+                'DeviceIndex': 0,
+                'AssociatePublicIpAddress': True,
+                'Groups': [security_group['GroupId']]
+            }
+        ],
+        BlockDeviceMappings=[
+            {
+                'DeviceName': '/dev/sda1',
+                'Ebs': {
+                    'VolumeSize': 10,
+                    'VolumeType': 'gp2'
+                }
+            }
+        ]
+    )
+
+    return instance['Instances'][0]
+
+
 def main():
     ec2_client = init_aws_clients()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', help='The name of the VPC.')
-    parser.add_argument('--cidr_block', help='The CIDR block for the VPC.')
-    parser.add_argument('--num_subnets', type=int, help='The number of subnets to create.')
-    parser.add_argument('--num_public_subnets', type=int, help='The number of public subnets.')
-    parser.add_argument('--subnet_cidr_blocks', nargs='+', help='The CIDR blocks for the subnets.')
-    parser.add_argument('--availability_zone', help='The availability zone for the subnets.')
+    parser.add_argument('--vpc_id', help='The ID of the VPC.')
+    parser.add_argument('--subnet_id', help='The ID of the subnet.')
+    parser.add_argument('--security_group_name', help='The name of the security group.')
+    parser.add_argument('--security_group_description', help='The description of the security group.')
+    parser.add_argument('--source_ip', help='The source IP address for SSH access.')
+    parser.add_argument('--key_pair_name', help='The name of the key pair.')
+    parser.add_argument('--key_pair_file', help='The file path to save the key pair.')
+    parser.add_argument('--image_id', help='The ID of the AMI.')
+    parser.add_argument('--instance_type', help='The type of EC2 instance.')
     args = parser.parse_args()
 
-    vpc = create_vpc(args, ec2_client)
-    igw = create_igw(args, vpc, ec2_client)
-    subnets = create_subnets(args, vpc, ec2_client)
+    client = ec2_client['ec2']
+    vpc = client.describe_vpcs(VpcIds=[args.vpc_id])['Vpcs'][0]
+    subnet = client.describe_subnets(SubnetIds=[args.subnet_id])['Subnets'][0]
 
-    print('VPC created: {}'.format(vpc['VpcId']))
-    print('IGW created: {}'.format(igw['InternetGatewayId']))
-    for i, subnet in enumerate(subnets):
-        subnet_type = 'public' if i < args.num_public_subnets else 'private'
-        print(f'{subnet_type} subnet created: {subnet["SubnetId"]}')
+    security_group = create_security_group(args, vpc, client)
+    key_pair = create_key_pair(args, client)
+    instance = launch_instance(args, vpc, subnet, security_group, key_pair, client)
+
+    print('Security group created: {}'.format(security_group['GroupId']))
+    print('Key pair created: {}'.format(key_pair['KeyName']))
+    print('Instance launched: {}'.format(instance['InstanceId']))
 
 
 if __name__ == '__main__':
